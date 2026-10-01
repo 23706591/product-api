@@ -1,0 +1,79 @@
+name: Product CI (Production-like)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  integration-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create external volume
+        run: docker volume create nammongodb_data
+
+      - name: Start MongoDB and API with Compose
+        run: docker compose up -d --build
+
+      - name: Wait for services to be healthy
+        run: |
+          for i in $(seq 1 30); do
+            mongo=$(docker inspect --format '{{.State.Health.Status}}' nammongodb)
+            api=$(docker inspect --format '{{.State.Health.Status}}' product-api)
+            echo "Attempt $i: mongo=$mongo api=$api"
+            if [ "$mongo" = "healthy" ] && [ "$api" = "healthy" ]; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Services did not become healthy in time"
+          docker compose logs
+          exit 1
+
+      - name: Health endpoint
+        run: curl -fsS http://localhost:3000/health
+
+      - name: CRUD - Create
+        run: |
+          curl -fsS -X POST http://localhost:3000/api/products \
+            -H "Content-Type: application/json" \
+            -d '{"pid":"CI001","pname":"CI Product","price":100,"quantity":5}'
+
+      - name: CRUD - Read all and one
+        run: |
+          curl -fsS http://localhost:3000/api/products
+          curl -fsS http://localhost:3000/api/products/CI001
+
+      - name: CRUD - Update
+        run: |
+          curl -fsS -X PUT http://localhost:3000/api/products/CI001 \
+            -H "Content-Type: application/json" \
+            -d '{"price":200,"quantity":9}' | grep '"price":200'
+
+      - name: Duplicate pid must be rejected (409)
+        run: |
+          code=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://localhost:3000/api/products \
+            -H "Content-Type: application/json" \
+            -d '{"pid":"CI001","pname":"Dup","price":1,"quantity":1}')
+          echo "HTTP status: $code"
+          test "$code" = "409"
+
+      - name: CRUD - Delete
+        run: |
+          curl -fsS -X DELETE http://localhost:3000/api/products/CI001
+          code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/api/products/CI001)
+          echo "HTTP status after delete: $code"
+          test "$code" = "404"
+
+      - name: Show logs on failure
+        if: failure()
+        run: docker compose logs
+
+      - name: Cleanup
+        if: always()
+        run: docker compose down -v
