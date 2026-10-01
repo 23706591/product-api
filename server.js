@@ -4,6 +4,12 @@ const mongoose = require('mongoose');
 
 const app = express();
 app.use(express.json());
+app.get('/health', (req, res) => {
+  const connected = mongoose.connection.readyState === 1;
+  res.status(connected ? 200 : 503).json({
+    status: connected ? 'ok' : 'unavailable',
+  });
+});
 app.use('/api/products', require('./routes/products'));
 
 const PORT = process.env.PORT || 3000;
