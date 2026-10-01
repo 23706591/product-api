@@ -1,0 +1,74 @@
+name: CD - Docker Hub
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create external volume
+        run: docker volume create nammongodb_data
+
+      - name: Start MongoDB and API with Compose
+        run: docker compose up -d --build
+
+      - name: Wait for services to be healthy
+        run: |
+          for i in $(seq 1 30); do
+            mongo=$(docker inspect --format '{{.State.Health.Status}}' nammongodb)
+            api=$(docker inspect --format '{{.State.Health.Status}}' product-api)
+            echo "Attempt $i: mongo=$mongo api=$api"
+            if [ "$mongo" = "healthy" ] && [ "$api" = "healthy" ]; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Services did not become healthy in time"
+          docker compose logs
+          exit 1
+
+      - name: Smoke test CRUD
+        run: |
+          curl -fsS http://localhost:3000/health
+          curl -fsS -X POST http://localhost:3000/api/products \
+            -H "Content-Type: application/json" \
+            -d '{"pid":"CD001","pname":"CD Product","price":100,"quantity":5}'
+          curl -fsS http://localhost:3000/api/products/CD001
+          curl -fsS -X DELETE http://localhost:3000/api/products/CD001
+
+      - name: Show logs on failure
+        if: failure()
+        run: docker compose logs
+
+      - name: Cleanup
+        if: always()
+        run: docker compose down -v
+
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/product-api:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/product-api:${{ github.sha }}
